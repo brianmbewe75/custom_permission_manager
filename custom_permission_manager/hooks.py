@@ -1,9 +1,21 @@
+# -*- coding: utf-8 -*-
+from __future__ import unicode_literals
+
+import frappe
+
 app_name = "custom_permission_manager"
 app_title = "Custom Permission Manager"
 app_publisher = "Your Company"
 app_description = "Enhanced Roles and Permissions Manager"
 app_email = "info@yourcompany.com"
 app_license = "mit"
+
+# Permission Query Conditions Hook
+# This hook is called for all doctypes when building permission queries
+# Use "*" to apply to all doctypes
+permission_query_conditions = {
+    "*": "custom_permission_manager.permission_manager.get_permission_query_conditions"
+}
 
 # Apps
 # ------------------
