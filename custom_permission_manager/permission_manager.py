@@ -15,15 +15,17 @@ def get_permission_query_conditions(user, doctype=None, **kwargs):
     query conditions. It restricts employees to see only records where the
     employee field matches their employee record.
     
-    EXCEPTIONS:
+    EXCEPTIONS (No restrictions applied):
     - Administrator: No restrictions (sees everything)
     - System Manager: No restrictions (sees everything)
     - Users without Employee role: No restrictions (handled by default permissions)
+    - Users with Employee role + OTHER roles: Other roles take precedence (e.g., HR Officer, HR Manager)
     
     GENERAL RULE:
-    - Users with Employee role: Can only see records where employee = their employee record
+    - Users with ONLY Employee role: Can only see records where employee = their employee record
     - If no employee record found: Returns "1=0" (sees nothing)
     - Works for ALL doctypes with employee field (Salary Slip, Leave Application, etc.)
+    - If user has Employee + other roles (like HR Officer), other roles' permissions take precedence
     
     Args:
         user: The username
@@ -62,14 +64,27 @@ def get_employee_permission_condition(doctype, user=None):
             return ""
         user = frappe.session.user
     
-    # EXCEPTION: Skip for Administrator and System Manager - they should see everything
+    # Get all user roles
     user_roles = frappe.get_roles(user)
+    
+    # EXCEPTION: Skip for Administrator and System Manager - they should see everything
     if user == "Administrator" or "System Manager" in user_roles:
         return ""  # No restriction for admins
     
     # Only apply restriction if user has Employee role
     if "Employee" not in user_roles:
         return ""  # Not an employee, no restriction needed
+    
+    # IMPORTANT: Check if user has OTHER roles besides Employee
+    # If they have other roles (like HR Officer, HR Manager, etc.), those should take precedence
+    # We'll exclude standard system roles from this check
+    system_roles = ["Administrator", "System Manager", "Employee", "Guest", "All"]
+    other_roles = [role for role in user_roles if role not in system_roles]
+    
+    # If user has other roles besides Employee, let those roles' permissions take precedence
+    # Don't apply Employee restriction - other roles should override
+    if other_roles:
+        return ""  # Other roles take precedence - no Employee restriction applied
     
     # Check if doctype has an 'employee' field
     try:
