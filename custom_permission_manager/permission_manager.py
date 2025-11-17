@@ -190,7 +190,8 @@ def get_workflow_permission_condition(doctype, user=None):
         
         # Apply restrictions based on role type
         if role == "Supervisor":
-            # Supervisor role: always restrict to own employee + all subordinates (direct and indirect)
+            # Supervisor role: can see ALL documents from their subordinates (regardless of workflow state)
+            # PLUS documents in workflow states where Supervisor can act
             if has_employee_field and user_employee:
                 try:
                     # Get all employees who report to this supervisor (direct and indirect - entire subtree)
@@ -207,17 +208,21 @@ def get_workflow_permission_condition(doctype, user=None):
                     
                     if final_allowed:
                         # Build SQL IN clause with proper escaping
-                        # frappe.db.escape adds quotes, so we need to handle it correctly
                         escaped_employees = []
                         for emp in final_allowed:
                             escaped_emp = frappe.db.escape(emp)
                             escaped_employees.append(escaped_emp)
                         employee_list = ', '.join(escaped_employees)
                         employee_restriction = f"`tab{doctype}`.`employee` IN ({employee_list})"
-                        conditions.append(f"(({state_condition}) AND ({employee_restriction}))")
+                        
+                        # Supervisor can see:
+                        # 1. All documents from their subordinates (regardless of state) - for monitoring/oversight
+                        # 2. Documents in workflow states where Supervisor can act (for approval)
+                        conditions.append(f"({employee_restriction})")  # All subordinate documents
+                        conditions.append(f"(({state_condition}) AND ({employee_restriction}))")  # Workflow state documents
                         
                         # Debug logging
-                        frappe.logger().info(f"[PERMISSION MANAGER] Supervisor {user_employee} can see {len(final_allowed)} employees: {final_allowed[:5]}...")
+                        frappe.logger().info(f"[PERMISSION MANAGER] Supervisor {user_employee} can see ALL documents from {len(final_allowed)} employees: {final_allowed[:5]}...")
                     else:
                         # No allowed employees, only own documents
                         pass
