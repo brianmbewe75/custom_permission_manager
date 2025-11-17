@@ -120,11 +120,8 @@ def get_workflow_permission_condition(doctype, user=None):
         return None
     
     # Get all states where the user's roles can act (based on workflow transitions)
-    # A user can see documents in states where they can make transitions FROM that state
     # Group states by role to apply role-specific restrictions
-    allowed_states_by_role = {}  # {role: set of states}
-    supervisor_states = set()  # States where Supervisor role can act
-    other_role_states = set()  # States where other roles (Manager, HR Manager, etc.) can act
+    states_by_role = {}  # {role: set of states}
     
     # Also allow documents where user is the owner (initiator)
     owner_condition = f"`tab{doctype}`.`owner` = {frappe.db.escape(user)}"
@@ -132,28 +129,18 @@ def get_workflow_permission_condition(doctype, user=None):
     # Check each transition to see if user's role can act on the FROM state
     if hasattr(workflow, 'transitions') and workflow.transitions:
         for transition in workflow.transitions:
-            # transition.state is the FROM state (where document needs to be)
-            # transition.allowed is the role that can make this transition
             transition_role = transition.get("allowed")
             if transition_role in user_roles:
                 state = transition.get("state")
-                if transition_role == "Supervisor":
-                    supervisor_states.add(state)
-                else:
-                    other_role_states.add(state)
-                # Track by role for future use
-                if transition_role not in allowed_states_by_role:
-                    allowed_states_by_role[transition_role] = set()
-                allowed_states_by_role[transition_role].add(state)
-    
-    # Combine all allowed states
-    all_allowed_states = supervisor_states | other_role_states
+                if transition_role not in states_by_role:
+                    states_by_role[transition_role] = set()
+                states_by_role[transition_role].add(state)
     
     # If user has no allowed states in workflow, they can only see their own documents
-    if not all_allowed_states:
+    if not states_by_role:
         return owner_condition
     
-    # Check if doctype has an employee field (needed for supervisor restriction)
+    # Check if doctype has an employee field (needed for employee-based restrictions)
     meta = frappe.get_meta(doctype)
     has_employee_field = False
     for field in meta.fields:
@@ -161,68 +148,174 @@ def get_workflow_permission_condition(doctype, user=None):
             has_employee_field = True
             break
     
-    # Build supervisor restriction (only for Supervisor role states)
-    supervisor_restriction = None
-    if supervisor_states and has_employee_field:
+    # Get user's employee record (needed for restrictions)
+    user_employee = None
+    if has_employee_field:
         try:
-            # Get user's employee record
             user_employee = frappe.db.get_value("Employee", {"user_id": user}, "name")
-            if user_employee:
-                # Get all employees who report to this supervisor
-                direct_reports = frappe.get_all(
-                    "Employee",
-                    filters={"reports_to": user_employee, "status": "Active"},
-                    pluck="name"
-                )
-                
-                # Supervisor can see: their own employee records + direct reports
-                allowed_employees = [user_employee]  # Include supervisor's own employee record
-                if direct_reports:
-                    allowed_employees.extend(direct_reports)
-                
-                # Properly escape employee names for SQL IN clause
-                escaped_employees = [frappe.db.escape(emp) for emp in allowed_employees]
-                employee_list = ', '.join(escaped_employees)
-                supervisor_restriction = f"`tab{doctype}`.`employee` IN ({employee_list})"
         except Exception:
-            # If error getting supervisor info, don't apply restriction
             pass
     
-    # Build condition: user can see documents where:
-    # 1. They are the owner, OR
-    # 2. Document is in a state where Supervisor role can act AND (employee restriction applies), OR
-    # 3. Document is in a state where other roles can act (no employee restriction - generic approval)
+    # Build conditions for each role
     conditions = [owner_condition]
     
-    # Add supervisor states with employee restriction
-    if supervisor_states:
-        supervisor_state_conditions = []
-        for state in supervisor_states:
-            supervisor_state_conditions.append(f"`tab{doctype}`.`{state_field}` = {frappe.db.escape(state)}")
+    for role, states in states_by_role.items():
+        if not states:
+            continue
         
-        if supervisor_state_conditions:
-            supervisor_state_condition = " OR ".join(supervisor_state_conditions)
-            if supervisor_restriction:
-                # Supervisor role: apply employee restriction
-                conditions.append(f"(({supervisor_state_condition}) AND ({supervisor_restriction}))")
+        # Build state conditions for this role
+        state_conditions = []
+        for state in states:
+            state_conditions.append(f"`tab{doctype}`.`{state_field}` = {frappe.db.escape(state)}")
+        state_condition = " OR ".join(state_conditions)
+        
+        # Check how many users have this role
+        try:
+            users_with_role = frappe.get_all(
+                "Has Role",
+                filters={"role": role, "parenttype": "User"},
+                fields=["parent"],
+                pluck="parent"
+            )
+            # Filter to only enabled users
+            enabled_users = frappe.get_all(
+                "User",
+                filters={"name": ["in", users_with_role], "enabled": 1},
+                pluck="name"
+            )
+            role_user_count = len(enabled_users) if enabled_users else 0
+        except Exception:
+            # If error, assume single user (safer - allows access)
+            role_user_count = 1
+        
+        # Apply restrictions based on role type
+        if role == "Supervisor":
+            # Supervisor role: always restrict to own employee + direct reports
+            if has_employee_field and user_employee:
+                try:
+                    # Get all employees who report to this supervisor (direct and indirect)
+                    direct_reports = get_all_subordinates(user_employee)
+                    allowed_employees = [user_employee]  # Include supervisor's own employee record
+                    if direct_reports:
+                        allowed_employees.extend(direct_reports)
+                    
+                    # Exclude supervisor chain: subordinates shouldn't see their supervisor's requests
+                    # Get user's supervisor chain to exclude
+                    supervisor_chain = get_supervisor_chain(user_employee)
+                    # Filter out supervisors from allowed list (but keep user's own employee)
+                    final_allowed = [emp for emp in allowed_employees if emp == user_employee or emp not in supervisor_chain]
+                    
+                    if final_allowed:
+                        escaped_employees = [frappe.db.escape(emp) for emp in final_allowed]
+                        employee_list = ', '.join(escaped_employees)
+                        employee_restriction = f"`tab{doctype}`.`employee` IN ({employee_list})"
+                        conditions.append(f"(({state_condition}) AND ({employee_restriction}))")
+                    else:
+                        # No allowed employees, only own documents
+                        pass
+                except Exception:
+                    # Error getting subordinates, just use state condition
+                    conditions.append(f"({state_condition})")
             else:
-                # Supervisor role but no restriction available, just state condition
-                conditions.append(f"({supervisor_state_condition})")
-    
-    # Add other role states without employee restriction (generic approval roles)
-    if other_role_states:
-        other_state_conditions = []
-        for state in other_role_states:
-            other_state_conditions.append(f"`tab{doctype}`.`{state_field}` = {frappe.db.escape(state)}")
+                # No employee field or user employee, just state condition
+                conditions.append(f"({state_condition})")
         
-        if other_state_conditions:
-            # Other roles (Manager, HR Manager, etc.): no employee restriction, see all documents in these states
-            other_state_condition = " OR ".join(other_state_conditions)
-            conditions.append(f"({other_state_condition})")
+        elif role_user_count > 1:
+            # Generic role with multiple users: restrict to line chain (reports_to hierarchy)
+            if has_employee_field and user_employee:
+                try:
+                    # Get all employees in user's line chain (all subordinates)
+                    line_chain_employees = get_all_subordinates(user_employee)
+                    allowed_employees = [user_employee]  # Include own employee record
+                    if line_chain_employees:
+                        allowed_employees.extend(line_chain_employees)
+                    
+                    # Exclude supervisor chain: subordinates shouldn't see their supervisor's requests
+                    # Get user's supervisor chain to exclude
+                    supervisor_chain = get_supervisor_chain(user_employee)
+                    # Filter out supervisors from allowed list (but keep user's own employee)
+                    final_allowed = [emp for emp in allowed_employees if emp == user_employee or emp not in supervisor_chain]
+                    
+                    if final_allowed:
+                        escaped_employees = [frappe.db.escape(emp) for emp in final_allowed]
+                        employee_list = ', '.join(escaped_employees)
+                        employee_restriction = f"`tab{doctype}`.`employee` IN ({employee_list})"
+                        conditions.append(f"(({state_condition}) AND ({employee_restriction}))")
+                    else:
+                        # No allowed employees, only own documents
+                        pass
+                except Exception:
+                    # Error getting line chain, just use state condition
+                    conditions.append(f"({state_condition})")
+            else:
+                # No employee field or user employee, just state condition
+                conditions.append(f"({state_condition})")
+        
+        else:
+            # Single-person role (like Director Engineering): see all documents in this state
+            conditions.append(f"({state_condition})")
     
     # Combine all conditions with OR
     condition = " OR ".join(conditions)
     return condition
+
+
+def get_all_subordinates(employee):
+    """
+    Get all employees who report to the given employee (direct and indirect).
+    Uses recursive query to get entire subtree.
+    """
+    try:
+        # Get employee's lft and rgt values (for nested set model)
+        emp_data = frappe.db.get_value("Employee", employee, ["lft", "rgt"], as_dict=True)
+        if not emp_data:
+            return []
+        
+        # Get all employees in the subtree (all subordinates)
+        subordinates = frappe.get_all(
+            "Employee",
+            filters={
+                "lft": [">", emp_data.lft],
+                "rgt": ["<", emp_data.rgt],
+                "status": "Active"
+            },
+            pluck="name"
+        )
+        return subordinates
+    except Exception:
+        # Fallback: get only direct reports
+        try:
+            direct_reports = frappe.get_all(
+                "Employee",
+                filters={"reports_to": employee, "status": "Active"},
+                pluck="name"
+            )
+            return direct_reports
+        except Exception:
+            return []
+
+
+def get_supervisor_chain(employee):
+    """
+    Get all supervisors in the chain above the given employee.
+    """
+    try:
+        chain = []
+        current_employee = employee
+        visited = set()
+        
+        while current_employee and current_employee not in visited:
+            visited.add(current_employee)
+            reports_to = frappe.db.get_value("Employee", current_employee, "reports_to")
+            if reports_to:
+                chain.append(reports_to)
+                current_employee = reports_to
+            else:
+                break
+        
+        return chain
+    except Exception:
+        return []
 
 
 def get_employee_permission_condition(doctype, user=None):
