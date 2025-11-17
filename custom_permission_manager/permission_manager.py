@@ -5,6 +5,7 @@ Provides employee-based permission conditions for Frappe's permission system
 """
 
 import frappe
+from frappe.model.workflow import get_transitions as frappe_get_transitions
 
 
 def get_permission_query_conditions(user, doctype=None, **kwargs):
@@ -442,4 +443,87 @@ def get_employee_permission_condition(doctype, user=None):
         return "1=0"
 
 
+@frappe.whitelist()
+def get_transitions(doc, workflow=None, raise_exception=False):
+    """
+    Override Frappe's get_transitions to filter Supervisor role actions
+    based on reports_to relationship.
+    
+    Only the direct supervisor (reports_to) of the employee who created
+    the document should see the action button, not all supervisors.
+    """
+    from frappe.model.document import Document
+    
+    # Ensure doc is a Document object
+    if not isinstance(doc, Document):
+        doc = frappe.get_doc(frappe.parse_json(doc))
+        doc.load_from_db()
+    
+    # Get transitions using Frappe's original function
+    transitions = frappe_get_transitions(doc, workflow, raise_exception)
+    
+    if not transitions:
+        return transitions
+    
+    # Check if document has an employee field
+    meta = frappe.get_meta(doc.doctype)
+    has_employee_field = False
+    for field in meta.fields:
+        if field.fieldname == "employee" and field.fieldtype == "Link" and field.options == "Employee":
+            has_employee_field = True
+            break
+    
+    if not has_employee_field:
+        # No employee field, return all transitions as-is
+        return transitions
+    
+    # Get the employee who created the document
+    doc_employee = doc.get("employee")
+    if not doc_employee:
+        # No employee on document, return all transitions
+        return transitions
+    
+    # Get current user's employee record
+    current_user = frappe.session.user
+    current_user_employee = None
+    try:
+        current_user_employee = frappe.db.get_value("Employee", {"user_id": current_user}, "name")
+    except Exception:
+        pass
+    
+    if not current_user_employee:
+        # Current user has no employee record, return all transitions
+        return transitions
+    
+    # Filter transitions: For Supervisor role, only show if current user is the direct supervisor
+    filtered_transitions = []
+    for transition in transitions:
+        transition_role = transition.get("allowed")
+        
+        # If transition is for Supervisor role, check reports_to relationship
+        if transition_role == "Supervisor":
+            try:
+                # Get the employee's direct supervisor (reports_to)
+                doc_employee_supervisor = frappe.db.get_value("Employee", doc_employee, "reports_to")
+                
+                # Only include this transition if current user's employee is the direct supervisor
+                if doc_employee_supervisor == current_user_employee:
+                    filtered_transitions.append(transition)
+                    frappe.logger().info(
+                        f"[PERMISSION MANAGER] Supervisor {current_user_employee} can act on "
+                        f"document {doc.name} (employee {doc_employee}'s supervisor)"
+                    )
+                else:
+                    frappe.logger().info(
+                        f"[PERMISSION MANAGER] Supervisor {current_user_employee} CANNOT act on "
+                        f"document {doc.name} (not direct supervisor of employee {doc_employee})"
+                    )
+            except Exception as e:
+                # Error checking reports_to, exclude this transition for safety
+                frappe.logger().error(f"Error checking supervisor relationship: {str(e)}")
+        else:
+            # Not Supervisor role, include transition as-is
+            filtered_transitions.append(transition)
+    
+    return filtered_transitions
 

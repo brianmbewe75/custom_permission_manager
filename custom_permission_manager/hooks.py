@@ -189,6 +189,11 @@ permission_query_conditions = {
 # override_whitelisted_methods = {
 # 	"frappe.desk.doctype.event.event.get_events": "custom_permission_manager.event.get_events"
 # }
+
+# Override workflow get_transitions to filter Supervisor role based on reports_to
+override_whitelisted_methods = {
+	"frappe.model.workflow.get_transitions": "custom_permission_manager.permission_manager.get_transitions"
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
