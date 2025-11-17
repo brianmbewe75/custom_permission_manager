@@ -138,16 +138,59 @@ def get_workflow_permission_condition(doctype, user=None):
     if not allowed_states:
         return owner_condition
     
+    # Check if user is a Supervisor and restrict to their direct reports
+    supervisor_restriction = None
+    if "Supervisor" in user_roles:
+        try:
+            # Get user's employee record
+            user_employee = frappe.db.get_value("Employee", {"user_id": user}, "name")
+            if user_employee:
+                # Get all employees who report to this supervisor
+                direct_reports = frappe.get_all(
+                    "Employee",
+                    filters={"reports_to": user_employee, "status": "Active"},
+                    pluck="name"
+                )
+                
+                # Check if doctype has an employee field
+                meta = frappe.get_meta(doctype)
+                has_employee_field = False
+                for field in meta.fields:
+                    if field.fieldname == "employee" and field.fieldtype == "Link" and field.options == "Employee":
+                        has_employee_field = True
+                        break
+                
+                if has_employee_field and direct_reports:
+                    # Supervisor can only see documents for their direct reports
+                    # Properly escape employee names for SQL IN clause
+                    escaped_employees = [frappe.db.escape(emp) for emp in direct_reports]
+                    employee_list = ', '.join(escaped_employees)
+                    supervisor_restriction = f"`tab{doctype}`.`employee` IN ({employee_list})"
+                elif has_employee_field and not direct_reports:
+                    # Supervisor with no direct reports sees nothing (except own documents)
+                    supervisor_restriction = "1=0"
+        except Exception:
+            # If error getting supervisor info, don't apply restriction
+            pass
+    
     # Build condition: user can see documents where:
     # 1. They are the owner, OR
     # 2. Document is in a state where their role can act
+    #    AND (if supervisor) document is for their direct reports
     state_conditions = []
     for state in allowed_states:
         state_conditions.append(f"`tab{doctype}`.`{state_field}` = {frappe.db.escape(state)}")
     
     if state_conditions:
         state_condition = " OR ".join(state_conditions)
-        condition = f"({owner_condition} OR ({state_condition}))"
+        
+        # If supervisor restriction exists, apply it to state-based visibility
+        if supervisor_restriction:
+            # Supervisor can see: own documents OR (documents in allowed states AND for their direct reports)
+            condition = f"({owner_condition} OR (({state_condition}) AND ({supervisor_restriction})))"
+        else:
+            # No supervisor restriction, normal workflow visibility
+            condition = f"({owner_condition} OR ({state_condition}))"
         return condition
     else:
         # No allowed states, only see own documents
