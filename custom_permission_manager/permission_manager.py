@@ -506,21 +506,47 @@ def get_transitions(doc, workflow=None, raise_exception=False):
                 # Get the employee's direct supervisor (reports_to)
                 doc_employee_supervisor = frappe.db.get_value("Employee", doc_employee, "reports_to")
                 
-                # Only include this transition if current user's employee is the direct supervisor
-                if doc_employee_supervisor == current_user_employee:
-                    filtered_transitions.append(transition)
+                # Also check if there's an assigned_to field that might override
+                assigned_to = doc.get("assigned_to")
+                assigned_to_employee = None
+                if assigned_to:
+                    # If assigned_to is a user, get their employee record
+                    assigned_to_employee = frappe.db.get_value("Employee", {"user_id": assigned_to}, "name")
+                
+                # Only include this transition if:
+                # 1. Current user's employee is the direct supervisor (reports_to), OR
+                # 2. Current user is assigned_to (if assigned_to field exists)
+                can_act = False
+                if assigned_to_employee and current_user_employee == assigned_to_employee:
+                    # User is assigned_to, they can act
+                    can_act = True
+                    frappe.logger().info(
+                        f"[PERMISSION MANAGER] Supervisor {current_user_employee} can act on "
+                        f"document {doc.name} (assigned_to)"
+                    )
+                elif doc_employee_supervisor == current_user_employee:
+                    # User is the direct supervisor (reports_to), they can act
+                    can_act = True
                     frappe.logger().info(
                         f"[PERMISSION MANAGER] Supervisor {current_user_employee} can act on "
                         f"document {doc.name} (employee {doc_employee}'s supervisor)"
                     )
                 else:
+                    # User is NOT the direct supervisor and NOT assigned_to, exclude this transition
                     frappe.logger().info(
                         f"[PERMISSION MANAGER] Supervisor {current_user_employee} CANNOT act on "
-                        f"document {doc.name} (not direct supervisor of employee {doc_employee})"
+                        f"document {doc.name} (not direct supervisor of employee {doc_employee}, "
+                        f"supervisor is {doc_employee_supervisor})"
                     )
+                
+                if can_act:
+                    filtered_transitions.append(transition)
+                # If can_act is False, transition is excluded (not added to filtered_transitions)
+                    
             except Exception as e:
                 # Error checking reports_to, exclude this transition for safety
                 frappe.logger().error(f"Error checking supervisor relationship: {str(e)}")
+                # Don't add transition if there's an error
         else:
             # Not Supervisor role, include transition as-is
             filtered_transitions.append(transition)
