@@ -157,7 +157,14 @@ def get_workflow_permission_condition(doctype, user=None):
             pass
     
     # Build conditions for each role
+    # Always include: documents user created (owner) AND documents where user is the employee
     conditions = [owner_condition]
+    
+    # Also allow users to see all documents where they are the employee (regardless of workflow state)
+    # This ensures initiators can always see their requests even after approval
+    if has_employee_field and user_employee:
+        employee_self_condition = f"`tab{doctype}`.`employee` = {frappe.db.escape(user_employee)}"
+        conditions.append(employee_self_condition)
     
     for role, states in states_by_role.items():
         if not states:
