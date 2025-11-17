@@ -5,7 +5,6 @@ Provides employee-based permission conditions for Frappe's permission system
 """
 
 import frappe
-from frappe.model.workflow import get_workflow
 
 
 def get_permission_query_conditions(user, doctype=None, **kwargs):
@@ -85,10 +84,21 @@ def get_workflow_permission_condition(doctype, user=None):
         return None  # No restriction for admins
     
     # Check if doctype has a workflow
+    # Use safe method to check for workflow without throwing errors
     try:
-        workflow = get_workflow(doctype)
+        workflow_list = frappe.get_all(
+            "Workflow",
+            filters={"document_type": doctype, "is_active": 1},
+            fields=["name"],
+            limit=1
+        )
+        if not workflow_list:
+            return None  # No workflow, let employee permissions handle it
+        
+        # Load the workflow document
+        workflow = frappe.get_doc("Workflow", workflow_list[0].name)
     except Exception:
-        # No workflow or error getting workflow
+        # No workflow or error getting workflow - return None silently
         return None
     
     if not workflow:
