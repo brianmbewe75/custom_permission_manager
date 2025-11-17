@@ -190,14 +190,14 @@ def get_workflow_permission_condition(doctype, user=None):
         
         # Apply restrictions based on role type
         if role == "Supervisor":
-            # Supervisor role: always restrict to own employee + direct reports
+            # Supervisor role: always restrict to own employee + all subordinates (direct and indirect)
             if has_employee_field and user_employee:
                 try:
-                    # Get all employees who report to this supervisor (direct and indirect)
-                    direct_reports = get_all_subordinates(user_employee)
+                    # Get all employees who report to this supervisor (direct and indirect - entire subtree)
+                    all_subordinates = get_all_subordinates(user_employee)
                     allowed_employees = [user_employee]  # Include supervisor's own employee record
-                    if direct_reports:
-                        allowed_employees.extend(direct_reports)
+                    if all_subordinates:
+                        allowed_employees.extend(all_subordinates)
                     
                     # Exclude supervisor chain: subordinates shouldn't see their supervisor's requests
                     # Get user's supervisor chain to exclude
@@ -206,15 +206,24 @@ def get_workflow_permission_condition(doctype, user=None):
                     final_allowed = [emp for emp in allowed_employees if emp == user_employee or emp not in supervisor_chain]
                     
                     if final_allowed:
-                        escaped_employees = [frappe.db.escape(emp) for emp in final_allowed]
+                        # Build SQL IN clause with proper escaping
+                        # frappe.db.escape adds quotes, so we need to handle it correctly
+                        escaped_employees = []
+                        for emp in final_allowed:
+                            escaped_emp = frappe.db.escape(emp)
+                            escaped_employees.append(escaped_emp)
                         employee_list = ', '.join(escaped_employees)
                         employee_restriction = f"`tab{doctype}`.`employee` IN ({employee_list})"
                         conditions.append(f"(({state_condition}) AND ({employee_restriction}))")
+                        
+                        # Debug logging
+                        frappe.logger().info(f"[PERMISSION MANAGER] Supervisor {user_employee} can see {len(final_allowed)} employees: {final_allowed[:5]}...")
                     else:
                         # No allowed employees, only own documents
                         pass
-                except Exception:
-                    # Error getting subordinates, just use state condition
+                except Exception as e:
+                    # Error getting subordinates, log and use state condition
+                    frappe.logger().error(f"Error getting subordinates for supervisor {user_employee}: {str(e)}")
                     conditions.append(f"({state_condition})")
             else:
                 # No employee field or user employee, just state condition
@@ -237,10 +246,17 @@ def get_workflow_permission_condition(doctype, user=None):
                     final_allowed = [emp for emp in allowed_employees if emp == user_employee or emp not in supervisor_chain]
                     
                     if final_allowed:
-                        escaped_employees = [frappe.db.escape(emp) for emp in final_allowed]
+                        # Build SQL IN clause with proper escaping
+                        escaped_employees = []
+                        for emp in final_allowed:
+                            escaped_emp = frappe.db.escape(emp)
+                            escaped_employees.append(escaped_emp)
                         employee_list = ', '.join(escaped_employees)
                         employee_restriction = f"`tab{doctype}`.`employee` IN ({employee_list})"
                         conditions.append(f"(({state_condition}) AND ({employee_restriction}))")
+                        
+                        # Debug logging
+                        frappe.logger().info(f"[PERMISSION MANAGER] Generic role user {user_employee} can see {len(final_allowed)} employees in line chain")
                     else:
                         # No allowed employees, only own documents
                         pass
@@ -263,15 +279,17 @@ def get_workflow_permission_condition(doctype, user=None):
 def get_all_subordinates(employee):
     """
     Get all employees who report to the given employee (direct and indirect).
-    Uses recursive query to get entire subtree.
+    Uses nested set model (lft/rgt) to get entire subtree efficiently.
     """
     try:
         # Get employee's lft and rgt values (for nested set model)
         emp_data = frappe.db.get_value("Employee", employee, ["lft", "rgt"], as_dict=True)
-        if not emp_data:
-            return []
+        if not emp_data or not emp_data.lft or not emp_data.rgt:
+            # If nested set not available, fallback to recursive reports_to query
+            return get_subordinates_recursive(employee)
         
         # Get all employees in the subtree (all subordinates)
+        # lft > parent.lft AND rgt < parent.rgt gets all descendants
         subordinates = frappe.get_all(
             "Employee",
             filters={
@@ -279,20 +297,47 @@ def get_all_subordinates(employee):
                 "rgt": ["<", emp_data.rgt],
                 "status": "Active"
             },
-            pluck="name"
+            pluck="name",
+            order_by="lft"
         )
-        return subordinates
-    except Exception:
-        # Fallback: get only direct reports
-        try:
-            direct_reports = frappe.get_all(
+        return subordinates if subordinates else []
+    except Exception as e:
+        # Fallback: use recursive method
+        frappe.logger().debug(f"Error using nested set for {employee}, using recursive method: {str(e)}")
+        return get_subordinates_recursive(employee)
+
+
+def get_subordinates_recursive(employee):
+    """
+    Recursively get all subordinates using reports_to field.
+    This is a fallback when nested set model is not available.
+    """
+    try:
+        all_subordinates = []
+        visited = set()
+        
+        def get_direct_reports(emp):
+            if emp in visited:
+                return []
+            visited.add(emp)
+            
+            direct = frappe.get_all(
                 "Employee",
-                filters={"reports_to": employee, "status": "Active"},
+                filters={"reports_to": emp, "status": "Active"},
                 pluck="name"
             )
-            return direct_reports
-        except Exception:
-            return []
+            
+            result = list(direct)
+            # Recursively get subordinates of subordinates
+            for sub in direct:
+                result.extend(get_direct_reports(sub))
+            
+            return result
+        
+        all_subordinates = get_direct_reports(employee)
+        return all_subordinates
+    except Exception:
+        return []
 
 
 def get_supervisor_chain(employee):
