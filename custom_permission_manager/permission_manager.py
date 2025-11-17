@@ -138,7 +138,7 @@ def get_workflow_permission_condition(doctype, user=None):
     if not allowed_states:
         return owner_condition
     
-    # Check if user is a Supervisor and restrict to their direct reports
+    # Check if user is a Supervisor and restrict to their direct reports + their own employee record
     supervisor_restriction = None
     if "Supervisor" in user_roles:
         try:
@@ -160,15 +160,19 @@ def get_workflow_permission_condition(doctype, user=None):
                         has_employee_field = True
                         break
                 
-                if has_employee_field and direct_reports:
-                    # Supervisor can only see documents for their direct reports
+                if has_employee_field:
+                    # Supervisor can see: their own employee records + direct reports
+                    allowed_employees = [user_employee]  # Include supervisor's own employee record
+                    if direct_reports:
+                        allowed_employees.extend(direct_reports)
+                    
                     # Properly escape employee names for SQL IN clause
-                    escaped_employees = [frappe.db.escape(emp) for emp in direct_reports]
+                    escaped_employees = [frappe.db.escape(emp) for emp in allowed_employees]
                     employee_list = ', '.join(escaped_employees)
                     supervisor_restriction = f"`tab{doctype}`.`employee` IN ({employee_list})"
-                elif has_employee_field and not direct_reports:
-                    # Supervisor with no direct reports sees nothing (except own documents)
-                    supervisor_restriction = "1=0"
+                else:
+                    # No employee field, can't apply supervisor restriction
+                    pass
         except Exception:
             # If error getting supervisor info, don't apply restriction
             pass
