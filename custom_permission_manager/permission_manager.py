@@ -176,16 +176,14 @@ def get_workflow_permission_condition(doctype, user=None):
 
         role_perms = get_role_permissions(meta, user=user)
         read_roles = set(role_perms.get("read", []) or [])
-        acting_roles = set(states_by_role.keys())
-
-        # Roles with read permission that are not used for workflow actions
-        privileged_roles = read_roles.intersection(set(user_roles)) - acting_roles
+        # Any role that grants READ on this doctype via Role & Permission Manager
+        privileged_roles = read_roles.intersection(set(user_roles))
 
         if privileged_roles:
-            # Grant full visibility
+            # Grant full visibility (role/permission manager takes precedence over workflow restriction)
             conditions.append("1=1")
             frappe.logger().info(
-                f"[PERMISSION MANAGER] Granting full visibility via privileged roles {list(privileged_roles)} on {doctype} for user {user}"
+                f"[PERMISSION MANAGER] Granting full visibility via role permissions {list(privileged_roles)} on {doctype} for user {user}"
             )
     except Exception as e:
         frappe.logger().debug(f"[PERMISSION MANAGER] Role permission override check failed: {str(e)}")
