@@ -166,6 +166,49 @@ def get_workflow_permission_condition(doctype, user=None):
     if has_employee_field and user_employee:
         employee_self_condition = f"`tab{doctype}`.`employee` = {frappe.db.escape(user_employee)}"
         conditions.append(employee_self_condition)
+
+    # --- Role & Permission Manager override for single-user special roles (outside workflow) ---
+    # If the user holds a single-person role that has read permission on this doctype
+    # (e.g., Director HR), allow full visibility regardless of workflow chain.
+    try:
+        from frappe.permissions import get_role_permissions
+
+        role_perms = get_role_permissions(meta, user=user)
+        read_roles = set(role_perms.get("read", []) or [])
+        user_roles_set = set(user_roles)
+        intersect_roles = read_roles.intersection(user_roles_set)
+
+        has_single_user_read_role = False
+        for role in intersect_roles:
+            try:
+                enabled_users = frappe.get_all(
+                    "Has Role",
+                    filters={"role": role, "parenttype": "User"},
+                    fields=["parent"],
+                    pluck="parent",
+                )
+                enabled_users = (
+                    frappe.get_all(
+                        "User", filters={"name": ["in", enabled_users], "enabled": 1}, pluck="name"
+                    )
+                    if enabled_users
+                    else []
+                )
+                if len(enabled_users) == 1:
+                    has_single_user_read_role = True
+                    break
+            except Exception:
+                # On error, be conservative and do not grant override
+                continue
+
+        if has_single_user_read_role:
+            # Full visibility via single-user privileged role
+            conditions.append("1=1")
+            frappe.logger().info(
+                f"[PERMISSION MANAGER] Granting full visibility via single-user role override on {doctype} for user {user}"
+            )
+    except Exception as e:
+        frappe.logger().debug(f"[PERMISSION MANAGER] Role permission override check failed: {str(e)}")
     
     for role, states in states_by_role.items():
         if not states:
