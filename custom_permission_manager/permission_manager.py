@@ -266,6 +266,9 @@ def get_workflow_permission_condition(doctype, user=None):
                             escaped_employees.append(escaped_emp)
                         employee_list = ', '.join(escaped_employees)
                         employee_restriction = f"`tab{doctype}`.`employee` IN ({employee_list})"
+                        # Allow viewing ALL documents in the user's line chain (so approvers can revisit after acting)
+                        conditions.append(f"({employee_restriction})")
+                        # Also keep the workflow-state specific visibility
                         conditions.append(f"(({state_condition}) AND ({employee_restriction}))")
                         
                         # Debug logging
