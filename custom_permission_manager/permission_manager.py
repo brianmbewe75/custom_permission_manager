@@ -217,7 +217,14 @@ def get_workflow_permission_condition(doctype, user=None):
             # If error, assume single user (safer - allows access)
             role_user_count = 1
         
-        # Apply restrictions based on role type
+        # Baseline workflow visibility:
+        # Any user in the workflow role should see documents in states where that
+        # role can act, even outside their reporting line.
+        # This addresses cases where users receive workflow notifications but were
+        # previously hidden from list results due to line-chain filtering.
+        conditions.append(f"({state_condition})")
+
+        # Apply additional visibility based on role type
         if role == "Supervisor":
             # Supervisor role: can see ALL documents from their subordinates (regardless of workflow state)
             # PLUS documents in workflow states where Supervisor can act
@@ -247,8 +254,8 @@ def get_workflow_permission_condition(doctype, user=None):
                         # Supervisor can see:
                         # 1. All documents from their subordinates (regardless of state) - for monitoring/oversight
                         # 2. Documents in workflow states where Supervisor can act (for approval)
+                        #    - already covered globally via baseline state_condition above
                         conditions.append(f"({employee_restriction})")  # All subordinate documents
-                        conditions.append(f"(({state_condition}) AND ({employee_restriction}))")  # Workflow state documents
                         
                         # Debug logging
                         frappe.logger().info(f"[PERMISSION MANAGER] Supervisor {user_employee} can see ALL documents from {len(final_allowed)} employees: {final_allowed[:5]}...")
@@ -289,8 +296,7 @@ def get_workflow_permission_condition(doctype, user=None):
                         employee_restriction = f"`tab{doctype}`.`employee` IN ({employee_list})"
                         # Allow viewing ALL documents in the user's line chain (so approvers can revisit after acting)
                         conditions.append(f"({employee_restriction})")
-                        # Also keep the workflow-state specific visibility
-                        conditions.append(f"(({state_condition}) AND ({employee_restriction}))")
+                        # Workflow-state visibility is already included globally above.
                         
                         # Debug logging
                         frappe.logger().info(f"[PERMISSION MANAGER] Generic role user {user_employee} can see {len(final_allowed)} employees in line chain")
@@ -301,12 +307,12 @@ def get_workflow_permission_condition(doctype, user=None):
                     # Error getting line chain, just use state condition
                     conditions.append(f"({state_condition})")
             else:
-                # No employee field or user employee, just state condition
-                conditions.append(f"({state_condition})")
+                # No employee field or user employee: baseline state condition already applies.
+                pass
         
         else:
-            # Single-person role (like Director Engineering): see all documents in this state
-            conditions.append(f"({state_condition})")
+            # Single-person role: baseline state condition already applies.
+            pass
     
     # Combine all conditions with OR
     condition = " OR ".join(conditions)
